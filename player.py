@@ -5,15 +5,10 @@ import torch
 from typing import Optional
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-from chess_tournament.players import Player
-
-
+from chess_tournament import Player 
 class TransformerPlayer(Player):
     """
     Tiny LM baseline chess player.
-
-    REQUIRED:
-        Subclasses chess_tournament.players.Player
     """
 
     UCI_REGEX = re.compile(r"\b([a-h][1-8][a-h][1-8][qrbn]?)\b", re.IGNORECASE)
@@ -26,25 +21,16 @@ class TransformerPlayer(Player):
         max_new_tokens: int = 8,
     ):
         super().__init__(name)
-
         self.model_id = model_id
         self.temperature = temperature
         self.max_new_tokens = max_new_tokens
-
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-
-        # Lazy-loaded components
         self.tokenizer = None
         self.model = None
 
-    # -------------------------
-    # Lazy loading
-    # -------------------------
     def _load_model(self):
         if self.model is None:
-            print(f"[{self.name}] Loading {self.model_id} on {self.device}...")
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
-
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
 
@@ -52,9 +38,6 @@ class TransformerPlayer(Player):
             self.model.to(self.device)
             self.model.eval()
 
-    # -------------------------
-    # Prompt
-    # -------------------------
     def _build_prompt(self, fen: str) -> str:
         return f"FEN: {fen}\nMove:"
 
@@ -62,46 +45,51 @@ class TransformerPlayer(Player):
         match = self.UCI_REGEX.search(text)
         return match.group(1).lower() if match else None
 
-    def _random_legal(self, fen: str) -> Optional[str]:
-        board = chess.Board(fen)
+    def _random_legal_from_board(self, board: chess.Board) -> Optional[str]:
         moves = list(board.legal_moves)
         return random.choice(moves).uci() if moves else None
 
-    # -------------------------
-    # Main API
-    # -------------------------
     def get_move(self, fen: str) -> Optional[str]:
+        board = chess.Board(fen)
+        if not any(board.legal_moves):
+            return None
 
         try:
             self._load_model()
         except Exception:
-            return self._random_legal(fen)
+            return self._random_legal_from_board(board)
 
         prompt = self._build_prompt(fen)
+        
+        for _ in range(3):
+            try:
+                inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
 
-        try:
-            inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+                with torch.no_grad():
+                    outputs = self.model.generate(
+                        **inputs,
+                        max_new_tokens=self.max_new_tokens,
+                        do_sample=True,
+                        temperature=self.temperature,
+                        pad_token_id=self.tokenizer.pad_token_id,
+                    )
 
-            with torch.no_grad():
-                outputs = self.model.generate(
-                    **inputs,
-                    max_new_tokens=self.max_new_tokens,
-                    do_sample=True,
-                    temperature=self.temperature,
-                    pad_token_id=self.tokenizer.pad_token_id,
-                )
+                decoded = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+                if decoded.startswith(prompt):
+                    decoded = decoded[len(prompt):]
 
-            decoded = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+                move = self._extract_move(decoded)
+                if not move:
+                    continue
+                try:
+                    uci_move = chess.Move.from_uci(move)
+                except ValueError:
+                    continue
 
-            if decoded.startswith(prompt):
-                decoded = decoded[len(prompt):]
+                if uci_move in board.legal_moves:
+                    return move
 
-            move = self._extract_move(decoded)
+            except Exception:
+                continue
 
-            if move:
-                return move
-
-        except Exception:
-            pass
-
-        return self._random_legal(fen)
+        return self._random_legal_from_board(board)
