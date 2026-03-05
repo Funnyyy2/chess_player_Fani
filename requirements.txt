@@ -2,6 +2,5 @@ python-chess
 torch
 transformers
 chess
-torch
 accelerate
 sentencepiece
